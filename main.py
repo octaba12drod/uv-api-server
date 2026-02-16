@@ -56,3 +56,4 @@ def receive_data(data: UVRequest):
     db.close()
 
     return {"message": "Datos guardados en PostgreSQL ✅"}
+
