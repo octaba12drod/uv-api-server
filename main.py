@@ -2,35 +2,35 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime
 import os
-import psycopg2
+from sqlalchemy import create_engine, Column, Integer, Float, Boolean, String, DateTime
+from sqlalchemy.orm import sessionmaker, declarative_base
 
+# Crear app
 app = FastAPI()
 
+# Obtener DATABASE_URL desde Railway
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-def get_connection():
-    return psycopg2.connect(DATABASE_URL)
+# Crear conexión
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
 
-# Crear tabla si no existe
-def create_table():
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS uv_data (
-            id SERIAL PRIMARY KEY,
-            device_id TEXT,
-            uv_index FLOAT,
-            alarm_triggered BOOLEAN,
-            timestamp TIMESTAMP
-        );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+# Modelo de tabla
+class UVData(Base):
+    __tablename__ = "uv_data"
 
-create_table()
+    id = Column(Integer, primary_key=True, index=True)
+    device_id = Column(String)
+    uv_index = Column(Float)
+    alarm_triggered = Column(Boolean)
+    timestamp = Column(DateTime)
 
-class UVData(BaseModel):
+# Crear tabla automáticamente
+Base.metadata.create_all(bind=engine)
+
+# Modelo para recibir datos
+class UVRequest(BaseModel):
     device_id: str
     uv_index: float
     alarm_triggered: bool
@@ -41,27 +41,18 @@ def root():
     return {"status": "UV API funcionando correctamente 🚀"}
 
 @app.post("/data")
-def receive_data(data: UVData):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO uv_data (device_id, uv_index, alarm_triggered, timestamp)
-        VALUES (%s, %s, %s, %s)
-    """, (data.device_id, data.uv_index, data.alarm_triggered, data.timestamp))
-    conn.commit()
-    cur.close()
-    conn.close()
+def receive_data(data: UVRequest):
+    db = SessionLocal()
+    
+    new_record = UVData(
+        device_id=data.device_id,
+        uv_index=data.uv_index,
+        alarm_triggered=data.alarm_triggered,
+        timestamp=data.timestamp
+    )
 
-    return {"message": "Datos guardados correctamente"}
+    db.add(new_record)
+    db.commit()
+    db.close()
 
-@app.get("/data")
-def get_all_data():
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM uv_data ORDER BY timestamp DESC")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    return {"data": rows}
-
+    return {"message": "Datos guardados en PostgreSQL ✅"}
