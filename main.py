@@ -1,24 +1,29 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
-from sqlalchemy import create_engine, Column, Integer, Float, Boolean, String, DateTime, func
+from sqlalchemy import create_engine, Column, Integer, Float, Boolean, String, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
+from fastapi.responses import FileResponse
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.platypus import Image
+import matplotlib.pyplot as plt
+import smtplib
+from email.message import EmailMessage
 
-# ==========================
-# Configuración base
-# ==========================
-
-app = FastAPI(title="UV Monitoring API - Professional Version")
+app = FastAPI(title="UV Monitoring API - Advanced Version")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
 # ==========================
-# Modelo de tabla
+# Modelo DB
 # ==========================
 
 class UVData(Base):
@@ -32,23 +37,11 @@ class UVData(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# ==========================
-# Modelo de entrada
-# ==========================
-
 class UVRequest(BaseModel):
     device_id: str
     uv_index: float
     alarm_triggered: bool
     timestamp: datetime
-
-# ==========================
-# Endpoint raíz
-# ==========================
-
-@app.get("/")
-def root():
-    return {"status": "UV API funcionando correctamente 🚀"}
 
 # ==========================
 # Guardar datos
@@ -57,73 +50,61 @@ def root():
 @app.post("/data")
 def receive_data(data: UVRequest):
     db = SessionLocal()
-
-    new_record = UVData(
-        device_id=data.device_id,
-        uv_index=data.uv_index,
-        alarm_triggered=data.alarm_triggered,
-        timestamp=data.timestamp
-    )
-
+    new_record = UVData(**data.dict())
     db.add(new_record)
     db.commit()
     db.close()
-
-    return {"message": "Datos guardados en PostgreSQL ✅"}
+    return {"message": "Datos guardados correctamente"}
 
 # ==========================
-# Ver todos los datos
+# Generar gráfico
 # ==========================
 
-@app.get("/all-data")
-def get_all_data():
+def generate_graph(records):
+    timestamps = [r.timestamp for r in records]
+    uv_values = [r.uv_index for r in records]
+
+    plt.figure()
+    plt.plot(timestamps, uv_values)
+    plt.xlabel("Time")
+    plt.ylabel("UV Index")
+    plt.title("Weekly UV Exposure")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig("uv_graph.png")
+    plt.close()
+
+# ==========================
+# Enviar email
+# ==========================
+
+def send_email_with_attachment(pdf_path, recipient):
+    msg = EmailMessage()
+    msg["Subject"] = "Weekly UV Exposure Report"
+    msg["From"] = EMAIL_ADDRESS
+    msg["To"] = recipient
+    msg.set_content("Attached is your weekly UV exposure report.")
+
+    with open(pdf_path, "rb") as f:
+        file_data = f.read()
+        msg.add_attachment(file_data, maintype="application",
+                           subtype="pdf", filename="weekly_report.pdf")
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        smtp.send_message(msg)
+
+# ==========================
+# Generar PDF + Enviar email
+# ==========================
+
+@app.get("/weekly-report")
+def weekly_report(recipient_email: str):
     db = SessionLocal()
-    records = db.query(UVData).order_by(UVData.timestamp.desc()).all()
-    db.close()
-
-    return [
-        {
-            "id": r.id,
-            "uv_index": r.uv_index,
-            "alarm_triggered": r.alarm_triggered,
-            "timestamp": r.timestamp
-        }
-        for r in records
-    ]
-
-# ==========================
-# Resumen estadístico
-# ==========================
-
-@app.get("/summary")
-def get_summary():
-    db = SessionLocal()
-
-    total_records = db.query(UVData).count()
-    avg_uv = db.query(func.avg(UVData.uv_index)).scalar()
-    max_uv = db.query(func.max(UVData.uv_index)).scalar()
-    alarms = db.query(UVData)\
-               .filter(UVData.alarm_triggered == True)\
-               .count()
-
-    db.close()
-
-    return {
-        "total_records": total_records,
-        "avg_uv": avg_uv,
-        "max_uv": max_uv,
-        "alarms_triggered": alarms
-    }
-
-# ==========================
-# Cálculo de dosis acumulada
-# ==========================
-
-@app.get("/dose")
-def calculate_dose():
-    db = SessionLocal()
+    one_week_ago = datetime.utcnow() - timedelta(days=7)
 
     records = db.query(UVData)\
+                .filter(UVData.timestamp >= one_week_ago)\
                 .order_by(UVData.timestamp.asc())\
                 .all()
 
@@ -132,66 +113,48 @@ def calculate_dose():
         return {"message": "No hay suficientes datos"}
 
     total_dose = 0
+    alarms = 0
+    max_uv = 0
 
     for i in range(len(records) - 1):
         uv = records[i].uv_index
-        t1 = records[i].timestamp
-        t2 = records[i + 1].timestamp
-
-        delta_seconds = (t2 - t1).total_seconds()
+        delta_seconds = (records[i+1].timestamp - records[i].timestamp).total_seconds()
         total_dose += uv * delta_seconds
 
-    db.close()
+        if uv > max_uv:
+            max_uv = uv
 
-    # Clasificación de riesgo
-    if total_dose < 5000:
-        risk = "BAJO"
-        recommendation = "Exposición segura"
-    elif total_dose < 15000:
-        risk = "MODERADO"
-        recommendation = "Considerar protección solar"
-    elif total_dose < 30000:
-        risk = "ALTO"
-        recommendation = "Usar protección y limitar exposición"
-    else:
-        risk = "CRÍTICO"
-        recommendation = "Evitar exposición inmediata"
+        if records[i].alarm_triggered:
+            alarms += 1
 
-    return {
-        "total_dose": round(total_dose, 2),
-        "risk_level": risk,
-        "recommendation": recommendation
-    }
-
-# ==========================
-# Horas más peligrosas
-# ==========================
-
-@app.get("/danger-hours")
-def danger_hours():
-    db = SessionLocal()
-
-    results = db.query(
-        func.extract("hour", UVData.timestamp).label("hour"),
-        func.avg(UVData.uv_index).label("avg_uv")
-    ).group_by("hour").order_by(func.avg(UVData.uv_index).desc()).all()
+    avg_uv = sum(r.uv_index for r in records) / len(records)
 
     db.close()
 
-    if not results:
-        return {"message": "No hay datos"}
+    # Generar gráfico
+    generate_graph(records)
 
-    most_dangerous_hour = results[0]
+    # Crear PDF
+    pdf_path = "weekly_report.pdf"
+    c = canvas.Canvas(pdf_path, pagesize=letter)
+    width, height = letter
 
-    return {
-        "most_dangerous_hour": int(most_dangerous_hour.hour),
-        "average_uv_at_that_hour": round(most_dangerous_hour.avg_uv, 2),
-        "ranking": [
-            {
-                "hour": int(r.hour),
-                "avg_uv": round(r.avg_uv, 2)
-            }
-            for r in results
-        ]
-    }
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(50, height - 50, "Weekly UV Exposure Report")
 
+    c.setFont("Helvetica", 12)
+    c.drawString(50, height - 100, f"Average UV Index: {round(avg_uv,2)}")
+    c.drawString(50, height - 130, f"Maximum UV Index: {round(max_uv,2)}")
+    c.drawString(50, height - 160, f"Total Dose: {round(total_dose,2)}")
+    c.drawString(50, height - 190, f"Alarm Activations: {alarms}")
+
+    # Insertar gráfico
+    c.drawImage("uv_graph.png", 50, height - 500, width=500, height=250)
+
+    c.save()
+
+    # Enviar email
+    send_email_with_attachment(pdf_path, recipient_email)
+
+    return FileResponse(pdf_path, media_type='application/pdf',
+                        filename="weekly_report.pdf")
