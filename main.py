@@ -566,3 +566,85 @@ def weekly_report(recipient_email: str, device_id: str = "ProtectorUV-01"):
 @app.get("/")
 def root():
     return {"status": "ok", "app": "UV Monitor API"}
+
+
+# ============================================================
+# Modelo DB — tabla lecturas (intervalos de 15 min)
+# ============================================================
+
+class Lectura(Base):
+    __tablename__ = "lecturas"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    device_id       = Column(String, index=True)
+    timestamp       = Column(DateTime, index=True)
+    hora            = Column(Integer)
+    dia_semana      = Column(Integer)
+    uvi_promedio    = Column(Float)
+    uvi_maximo      = Column(Float)
+    dosis_intervalo = Column(Float)
+    dosis_acumulada = Column(Float)
+
+    __table_args__ = (
+        # UPSERT: si llega el mismo timestamp + device_id se ignora
+        # Esto hace seguro reenviar sin duplicar datos
+        {"sqlite_autoincrement": False},
+    )
+
+
+Base.metadata.create_all(bind=engine)
+
+
+class LecturaRequest(BaseModel):
+    device_id:       str
+    timestamp:       int        # Unix time en segundos
+    uvi_promedio:    float
+    uvi_maximo:      float
+    dosis_intervalo: float      # J/m²
+    dosis_acumulada: float      # J/m²
+    hora:            int
+    dia_semana:      int
+
+
+# ============================================================
+# Endpoint: recibir registro de intervalo de 15 min
+# POST /lecturas
+# Usa INSERT ... ON CONFLICT DO NOTHING (UPSERT seguro)
+# ============================================================
+
+@app.post("/lecturas")
+def receive_lectura(data: LecturaRequest):
+
+    db = SessionLocal()
+
+    try:
+        ts = datetime.utcfromtimestamp(data.timestamp)
+
+        # Verificar si ya existe este registro (UPSERT manual)
+        existe = db.query(Lectura).filter(
+            Lectura.device_id == data.device_id,
+            Lectura.timestamp == ts
+        ).first()
+
+        if not existe:
+            nueva = Lectura(
+                device_id       = data.device_id,
+                timestamp       = ts,
+                hora            = data.hora,
+                dia_semana      = data.dia_semana,
+                uvi_promedio    = data.uvi_promedio,
+                uvi_maximo      = data.uvi_maximo,
+                dosis_intervalo = data.dosis_intervalo,
+                dosis_acumulada = data.dosis_acumulada
+            )
+            db.add(nueva)
+            db.commit()
+            return {"message": "Lectura guardada"}
+        else:
+            return {"message": "Lectura ya existía — ignorada (UPSERT)"}
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
