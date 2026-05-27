@@ -14,6 +14,8 @@ import matplotlib
 matplotlib.use("Agg")   # backend sin pantalla (necesario en Railway)
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import urllib.request
+import json as json_lib
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -477,30 +479,35 @@ def _generate_pdf(stats: dict, graph_buf: io.BytesIO) -> io.BytesIO:
 
 
 def _send_email(pdf_buf: io.BytesIO, recipient: str):
-    """Envía el PDF por correo usando Gmail."""
+    import base64
+    pdf_b64 = base64.b64encode(pdf_buf.read()).decode()
 
-    msg             = EmailMessage()
-    msg["Subject"]  = "☀️ Tu reporte semanal de exposición UV — ProtectorUV"
-    msg["From"]     = EMAIL_ADDRESS
-    msg["To"]       = recipient
+    payload = json_lib.dumps({
+        "personalizations": [{"to": [{"email": recipient}]}],
+        "from": {"email": EMAIL_ADDRESS, "name": "UV Protect"},
+        "subject": "☀️ Tu reporte semanal UV — ProtectorUV",
+        "content": [{"type": "text/plain", "value":
+            "Adjunto encontrarás tu reporte semanal de exposición UV.\n\n— UV Protect"}],
+        "attachments": [{
+            "content":     pdf_b64,
+            "type":        "application/pdf",
+            "filename":    "reporte_semanal_UV.pdf",
+            "disposition": "attachment"
+        }]
+    }).encode()
 
-    msg.set_content(
-        "Hola,\n\n"
-        "Adjunto encontrarás tu reporte semanal de exposición UV generado por ProtectorUV.\n\n"
-        "Revisa las recomendaciones para mantener una exposición solar saludable.\n\n"
-        "— ProtectorUV"
+    req = urllib.request.Request(
+        "https://api.sendgrid.com/v3/mail/send",
+        data    = payload,
+        headers = {
+            "Authorization": f"Bearer {os.getenv('SENDGRID_API_KEY')}",
+            "Content-Type":  "application/json"
+        },
+        method = "POST"
     )
-
-    msg.add_attachment(
-        pdf_buf.read(),
-        maintype = "application",
-        subtype  = "pdf",
-        filename = "reporte_semanal_UV.pdf"
-    )
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        smtp.send_message(msg)
+    with urllib.request.urlopen(req) as resp:
+        if resp.status not in (200, 202):
+            raise Exception(f"SendGrid error: {resp.status}")
 
 
 # ============================================================
